@@ -1,6 +1,6 @@
 {
-  "call": true,
-  "copy": true,
-  "ticket": true,
-  "paste": true
+  "call": false,
+  "copy": false,
+  "ticket": false,
+  "paste": false
 }
