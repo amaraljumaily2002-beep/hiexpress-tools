@@ -328,36 +328,28 @@
     } catch (e) { log(e); toast(errMsg(e), false); }
   }
 
-  async function copyBoth(dialog, btn) {
-    const cur = getBgh(dialog);
-    if (btn.dataset.step === '2' && btn.dataset.bgh !== cur) {
-      btn.dataset.step = '';
-      btn.textContent = '📋 صورة ثم نص';
-    }
-    if (btn.dataset.step === '2') {
-      await copyTextOnly(dialog);
-      btn.dataset.step = '';
-      btn.textContent = '📋 صورة ثم نص';
-      return;
-    }
-    try {
-      const snap = snapshot(dialog);
-      const blob = await getImage(dialog, snap);
-      if (!blob) return toast('لا توجد صورة', false);
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-      btn.dataset.step = '2';
-      btn.dataset.bgh = snap.bgh;
-      btn.textContent = '② انسخ النص الآن';
-      toast('تم نسخ الصورة. الصقها ثم اضغط الزر للنص');
-    } catch (e) { log(e); toast(errMsg(e), false); }
+  // ===== الشريط المشترك بين copy.js و ticket.js =====
+  // ترتيب الأزرار (من اليمين): 1 توجيه للعميل، 2 نص فقط، 3 صورة فقط، 4 حالة مرفوضة
+  function getBar(dialog) {
+    let bar = dialog.querySelector('[data-hx-bar]');
+    if (bar) return bar;
+    bar = document.createElement('div');
+    bar.setAttribute('data-hx-bar', '1');
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;justify-content:center;gap:8px;padding:4px 16px;direction:rtl;';
+    const content = dialog.querySelector('.MuiDialogContent-root, [class*="DialogContent"]');
+    if (content) content.prepend(bar);
+    else if (dialog.firstElementChild) dialog.firstElementChild.appendChild(bar);
+    else return null;
+    return bar;
   }
 
-  function makeBtn(text, color, handler) {
+  function makeBtn(text, color, order, handler) {
     const b = document.createElement('button');
     b.textContent = text; b.type = 'button';
     b.style.cssText =
-      'margin:6px 4px;padding:8px 14px;border:0;border-radius:6px;cursor:pointer;' +
+      'margin:4px 0;padding:8px 14px;border:0;border-radius:6px;cursor:pointer;' +
       'color:#fff;font-size:14px;background:' + color;
+    b.style.order = String(order);
     b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); handler(b); });
     return b;
   }
@@ -365,19 +357,24 @@
   function inject() {
     if (!document.body) return;
     document.querySelectorAll('[role="dialog"]').forEach(dialog => {
-      if (dialog.dataset.hxCopy) return;
       if (!dialog.textContent.includes('مراجعة الحالة')) return;
+
+      const bar = getBar(dialog);
+      if (bar) {
+        if (!bar.querySelector('button[data-hx-copy-text]')) {
+          const b = makeBtn('📝 نص فقط', '#2f9e44', 2, () => copyTextOnly(dialog));
+          b.setAttribute('data-hx-copy-text', '1');
+          bar.appendChild(b);
+        }
+        if (!bar.querySelector('button[data-hx-copy-img]')) {
+          const b = makeBtn('🖼 صورة فقط', '#6741d9', 3, () => copyImageOnly(dialog));
+          b.setAttribute('data-hx-copy-img', '1');
+          bar.appendChild(b);
+        }
+      }
+
+      if (dialog.dataset.hxCopy) return;
       dialog.dataset.hxCopy = '1';
-
-      const bar = document.createElement('div');
-      bar.style.cssText = 'padding:4px 16px;text-align:center;';
-      bar.appendChild(makeBtn('📋 صورة ثم نص', '#0b7285', b => copyBoth(dialog, b)));
-      bar.appendChild(makeBtn('📝 نص فقط', '#2f9e44', () => copyTextOnly(dialog)));
-      bar.appendChild(makeBtn('🖼 صورة فقط', '#6741d9', () => copyImageOnly(dialog)));
-
-      const content = dialog.querySelector('.MuiDialogContent-root, [class*="DialogContent"]');
-      if (content) content.prepend(bar);
-      else dialog.firstElementChild?.appendChild(bar);
 
       let t2, last = '';
       new MutationObserver(() => {
