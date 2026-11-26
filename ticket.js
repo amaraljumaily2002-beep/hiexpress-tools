@@ -10,6 +10,19 @@
   const FALLBACK_AFTER_CLICK = 3000;
   const WAIT_MS = 2 * 60 * 1000;
 
+  // ===== إعدادات زر "حالة مرفوضة" =====
+  const REJ_TITLE = 'حالة خاطئة';
+  const REJ_CATEGORY_ID = '11';       // مشكلة طلب
+  const REJ_IS_PRIVATE = '1';         // التعليق خاص
+  const REJ_DRIVER_PRIVATE = '0';     // 0 = ظاهر للمندوب، 1 = مخفي عن المندوب
+  const DONE_STATUS_ID = 3;           // تم الإنجاز
+  const REJ_MSG = [
+    'كابتن من فضلك عند رفع اي حالة بالطلب < لا يرد - رفض - تأجيل ... ألخ > يرجى تثبيت الحالة بـ رسالة نصية داخل محادثة الزبون ليتم الموافقة على الحالة',
+    ' مثال : { تم الوصول الى الزبون ورفض استلام الطلب }',
+    ' تكون داخل محادثة الزبون على الواتساب او رسالة نصية ان لم يتوفر واتساب ليتم الموافقة على الحالة من قبلنا حسب تعليمات الشركة',
+    'شاكرين تعاونكم معنا'
+  ].join('\n');
+
   const API = 'https://api.hi-express.co/api/v2';
   const W = unsafeWindow;
   const log = (...a) => console.log('[HX3]', ...a);
@@ -153,6 +166,8 @@
     const m = (e && e.message) || String(e);
     if (m === 'NOTOKEN') return 'لم ألتقط توكن النظام. حدّث الصفحة (F5)';
     if (m === 'MISMATCH') return 'تذاكر الطلب لا تطابق الطلب الظاهر';
+    if (m === 'MISMATCH_ORDER') return 'معرّف الطلب الداخلي لا يطابق الطلب الظاهر. انتظر تحميل القائمة وأعد الضغط';
+    if (m === 'NOID') return 'لم أجد معرّف الطلب الداخلي. انتظر تحميل القائمة وأعد الضغط';
     return m;
   }
 
@@ -406,6 +421,93 @@
     }
   }
 
+  // ===== زر "حالة مرفوضة": تذكرة جديدة دائماً + تعليق خاص ظاهر للمندوب + تم الإنجاز =====
+  const rej = {};
+
+  async function verifyOrderId(dialog, bgh) {
+    const cands = [];
+    if (idMap[bgh]) cands.push(String(idMap[bgh]));
+    const f = fiberOrderId(dialog);
+    if (f && !cands.includes(String(f))) cands.push(String(f));
+    if (!cands.length) throw new Error('NOID');
+    for (const id of cands) {
+      const j = await gm('GET', API + '/order/' + id);
+      const o = j && j.data && j.data[0];
+      if (o && o.order_identifier === bgh) return id;
+    }
+    throw new Error('MISMATCH_ORDER');
+  }
+
+  async function onReject(dialog) {
+    if (!HX.on()) return toast('هذه الأداة موقوفة من الإدارة', false);
+    const bgh = getBgh(dialog);
+    if (!bgh) return toast('لم أجد رقم الطلب', false);
+    if (rej[bgh]) return toast('جاري التنفيذ الآن', false);
+    rej[bgh] = true;
+    refreshAll();
+    const done = [];
+    let step = 'التحقق من الطلب';
+    try {
+      const orderId = await verifyOrderId(dialog, bgh);
+
+      step = 'إنشاء التذكرة';
+      const fd = new FormData();
+      fd.append('title', REJ_TITLE);
+      fd.append('department_id', '');
+      fd.append('tagged_user_id', '');
+      fd.append('description', REJ_MSG);
+      fd.append('order_id', orderId);
+      fd.append('is_private', '1');
+      fd.append('ticket_category_id', REJ_CATEGORY_ID);
+      fd.append('problemable_type', '');
+      fd.append('problemable_id', '');
+      fd.append('client_id', '');
+      fd.append('attachments', '');
+      const j = await gm('POST', API + '/tickets', { form: fd });
+      const t = j && j.data && j.data[0];
+      if (!t || !t.id) throw new Error('لم أستلم رقم التذكرة من الخادم');
+      done.push('إنشاء التذكرة #' + t.id);
+
+      step = 'إضافة التعليق';
+      const cf = new FormData();
+      cf.append('comment', REJ_MSG);
+      cf.append('ticket_id', String(t.id));
+      cf.append('is_private', REJ_IS_PRIVATE);
+      cf.append('is_driver_private', REJ_DRIVER_PRIVATE);
+      cf.append('is_send_to_jenni', '0');
+      await gm('POST', API + '/comments', { form: cf });
+      done.push('التعليق');
+
+      step = 'تحويل الحالة إلى تم الإنجاز';
+      await gm('PUT', API + '/tickets/status/' + t.id, { json: { ticket_status_id: DONE_STATUS_ID } });
+      done.push('تم الإنجاز');
+
+      toast('✅ ' + bgh + ' — #' + t.id + ': ' + done.slice(1).join('، '), true, 4000);
+    } catch (e) {
+      log(e);
+      toast('توقف عند: ' + step + ' — ' + errMsg(e) +
+        (done.length ? '\nنُفِّذ قبل التوقف: ' + done.join('، ') + '\nراجع التذكرة يدوياً' : '\nلم يتغير شيء'), false, 15000);
+    } finally {
+      delete rej[bgh];
+      refreshAll();
+    }
+  }
+
+  // ===== الشريط المشترك بين copy.js و ticket.js =====
+  // ترتيب الأزرار (من اليمين): 1 توجيه للعميل، 2 نص فقط، 3 صورة فقط، 4 حالة مرفوضة
+  function getBar(dialog) {
+    let bar = dialog.querySelector('[data-hx-bar]');
+    if (bar) return bar;
+    bar = document.createElement('div');
+    bar.setAttribute('data-hx-bar', '1');
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;justify-content:center;gap:8px;padding:4px 16px;direction:rtl;';
+    const content = dialog.querySelector('.MuiDialogContent-root, [class*="DialogContent"]');
+    if (content) content.prepend(bar);
+    else if (dialog.firstElementChild) dialog.firstElementChild.appendChild(bar);
+    else return null;
+    return bar;
+  }
+
   function refreshBtn(dialog, b) {
     const j = jobs[getBgh(dialog)];
     let txt = '📨 توجيه للعميل', bg = '#e8590c';
@@ -418,12 +520,35 @@
     if (b.style.background !== bg) b.style.background = bg;
   }
 
+  function refreshRej(dialog, b) {
+    const running = !!rej[getBgh(dialog)];
+    const txt = running ? '⚙️ جاري الإرسال...' : '⛔ حالة مرفوضة';
+    const bg = running ? '#7048e8' : '#c92a2a';
+    if (b.textContent !== txt) b.textContent = txt;
+    if (b.style.background !== bg) b.style.background = bg;
+    b.disabled = running;
+    b.style.opacity = running ? '0.7' : '1';
+  }
+
+  const BTN_CSS = 'margin:4px 0;padding:8px 14px;border:0;border-radius:6px;cursor:pointer;color:#fff;font-size:14px;';
+
   function makeBtn(dialog) {
     const b = document.createElement('button');
     b.type = 'button';
-    b.dataset.hx3 = '1';
-    b.style.cssText = 'margin:6px 4px;padding:8px 14px;border:0;border-radius:6px;cursor:pointer;color:#fff;font-size:14px;';
+    b.setAttribute('data-hx3', '1');
+    b.style.cssText = BTN_CSS;
+    b.style.order = '1';
     b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); onToggle(dialog); });
+    return b;
+  }
+
+  function makeRejBtn(dialog) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('data-hx4', '1');
+    b.style.cssText = BTN_CSS;
+    b.style.order = '4';
+    b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); onReject(dialog); });
     return b;
   }
 
@@ -432,25 +557,29 @@
       const d = b.closest('[role="dialog"]');
       if (d) refreshBtn(d, b);
     });
+    document.querySelectorAll('[role="dialog"] button[data-hx4]').forEach(b => {
+      const d = b.closest('[role="dialog"]');
+      if (d) refreshRej(d, b);
+    });
+  }
+
+  function removeOwn() {
+    document.querySelectorAll('button[data-hx3], button[data-hx4]').forEach(b => b.remove());
+    document.querySelectorAll('[data-hx-bar]').forEach(bar => { if (!bar.children.length) bar.remove(); });
   }
 
   function inject() {
-    if (!HX.on()) {
-      document.querySelectorAll('button[data-hx3]').forEach(b => b.parentElement && b.parentElement.remove());
-      return;
-    }
+    if (!HX.on()) { removeOwn(); return; }
     document.querySelectorAll('[role="dialog"]').forEach(dialog => {
       if (!dialog.textContent.includes('مراجعة الحالة')) return;
-      let b = dialog.querySelector('button[data-hx3]');
-      if (!b) {
-        b = makeBtn(dialog);
-        const bar = document.createElement('div');
-        bar.style.cssText = 'padding:2px 16px;text-align:center;';
-        bar.appendChild(b);
-        const content = dialog.querySelector('.MuiDialogContent-root, [class*="DialogContent"]');
-        if (content) content.prepend(bar); else dialog.firstElementChild?.appendChild(bar);
-      }
+      const bar = getBar(dialog);
+      if (!bar) return;
+      let b = bar.querySelector('button[data-hx3]');
+      if (!b) { b = makeBtn(dialog); bar.appendChild(b); }
+      let r = bar.querySelector('button[data-hx4]');
+      if (!r) { r = makeRejBtn(dialog); bar.appendChild(r); }
       refreshBtn(dialog, b);
+      refreshRej(dialog, r);
       prefetch(dialog);
     });
   }
